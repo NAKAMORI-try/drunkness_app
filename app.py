@@ -34,9 +34,28 @@ from scipy.signal import medfilt
 
 st.set_page_config(page_title="酔っ払い度判定デモ", page_icon="🍶", layout="centered")
 
-RTC_CONFIGURATION = RTCConfiguration({
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-})
+def rtc_config_from_secrets():
+    # Secrets に TURN 設定があれば優先
+    try:
+        if "webrtc" in st.secrets:
+            s = st.secrets["webrtc"]
+            turn_uri = s.get("turn_uri")
+            turn_username = s.get("turn_username")
+            turn_password = s.get("turn_password")
+            if turn_uri and turn_username and turn_password:
+                return RTCConfiguration({
+                    "iceServers": [
+                        {"urls": [turn_uri], "username": turn_username, "credential": turn_password}
+                    ]
+                })
+    except Exception:
+        pass
+    # フォールバック: STUN のみ
+    return RTCConfiguration({
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    })
+
+RTC_CONFIGURATION = rtc_config_from_secrets()
 
 # ----------------------------- ユーティリティ ----------------------------- #
 
@@ -248,6 +267,16 @@ webrtc_ctx = webrtc_streamer(
     rtc_configuration=RTC_CONFIGURATION,
     async_processing=False,
 )
+
+# --- 接続診断（簡易） ---
+with st.expander("接続診断 / Troubleshooting"):
+    st.write({
+        "playing": getattr(webrtc_ctx.state, "playing", False) if webrtc_ctx else False,
+        "sender_ready": bool(getattr(webrtc_ctx, "sender", None)),
+    })
+    st.caption(
+        "playing=False の場合は、ブラウザのマイク許可やネットワーク制限(TURN未設定)により接続が確立していない可能性があります。"
+    )
 
 if webrtc_ctx.state.playing:
     webrtc_ctx.receiver.audio_transformer = recorder.recv_callback
