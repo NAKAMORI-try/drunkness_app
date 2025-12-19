@@ -1,7 +1,5 @@
 streamlit
-streamlit-webrtc
-av
-numpy
 librosa
 soundfile
-scipy
+numpy
+openai
