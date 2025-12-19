@@ -2,4 +2,3 @@ streamlit
 librosa
 soundfile
 numpy
-openai
