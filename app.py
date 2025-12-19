@@ -15,7 +15,7 @@ st.markdown("""
 ※ 完全に遊び用の指標です。本気の診断・評価には使わないでください。
 """)
 
-uploaded = st.file_uploader("音声ファイルをアップロード", type=["wav", "mp3", "m4a", "ogg"])
+uploaded = st.file_uploader("音声ファイルをアップロード（wav推奨）", type=["wav", "ogg", "flac"])
 
 def normalize(x, lo, hi, invert=False):
     """値を0〜1に正規化（範囲外はクリップ）"""
@@ -30,7 +30,14 @@ if uploaded:
     # librosaで読み込み
     # 一度バッファに吸い上げてから読むとフォーマットの違いに強い
     buf = io.BytesIO(uploaded.read())
-    y, sr = librosa.load(buf, sr=None, mono=True)
+    try:
+        y, sr = librosa.load(buf, sr=None, mono=True)
+    except sf.LibsndfileError:
+        st.error(
+            "このファイル形式はサーバ側で読み取れませんでした。\n"
+            "WAV / OGG / FLAC 形式の音声ファイルをアップロードしてください。"
+        )
+        st.stop()
 
     duration = len(y) / sr
     st.caption(f"録音長: 約 {duration:.1f} 秒, サンプリングレート: {sr} Hz")
