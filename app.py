@@ -39,6 +39,7 @@ webrtc_ctx = webrtc_streamer(
     mode=WebRtcMode.SENDONLY,
     audio_receiver_size=256,
     rtc_configuration=RTC_CONFIGURATION,
+    media_stream_constraints={"audio": True, "video": False},
     audio_frame_callback=audio_receiver,
 )
 
