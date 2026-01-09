@@ -1,108 +1,77 @@
 import streamlit as st
 import numpy as np
 import librosa
-import soundfile as sf
-import io
+import av
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import queue
 
-st.title("🍶 酔っ払い度解析アプリ（音声特徴量のみ・TURN不要版）")
+st.title("🍶 酔っ払い度判定アプリ（WebRTC＋TURN対応版）")
 
 st.markdown("""
-### 📝 使い方
-1. スマホやPCの **ボイスメモ等で録音** する  
-2. 録音した音声ファイル（wav/mp3/m4a など）を下からアップロード  
-3. 音量・発話のばらつき・無音の多さなどから **酔っ払い度（0〜100）** を推定します  
-
-※ 完全に遊び用の指標です。本気の診断・評価には使わないでください。
+### 使い方
+1. ブラウザで **録音開始**
+2. 5〜10秒ほど日本語を話す
+3. **停止**すると自動で解析し、酔っ払い度を表示します
 """)
 
-uploaded = st.file_uploader("音声ファイルをアップロード（wav推奨）", type=["wav", "ogg", "flac"])
+# =========================
+# TURN 設定（Secretsから取得）
+# =========================
+RTC_CONFIGURATION = RTCConfiguration({
+    "iceServers": [
+        {
+            "urls": st.secrets["webrtc"]["turn_uri"],
+            "username": st.secrets["webrtc"]["turn_username"],
+            "credential": st.secrets["webrtc"]["turn_password"],
+        }
+    ]
+})
 
-def normalize(x, lo, hi, invert=False):
-    """値を0〜1に正規化（範囲外はクリップ）"""
-    x_clamped = max(lo, min(hi, x))
-    v = (x_clamped - lo) / (hi - lo + 1e-9)
-    return 1.0 - v if invert else v
+audio_queue = queue.Queue()
 
-if uploaded:
-    # 再生用
-    st.audio(uploaded)
+def audio_receiver(frame: av.AudioFrame):
+    pcm = frame.to_ndarray().astype(np.float32)
+    audio_queue.put(pcm)
+    return frame
 
-    # librosaで読み込み
-    # 一度バッファに吸い上げてから読むとフォーマットの違いに強い
-    buf = io.BytesIO(uploaded.read())
-    try:
-        y, sr = librosa.load(buf, sr=None, mono=True)
-    except sf.LibsndfileError:
-        st.error(
-            "このファイル形式はサーバ側で読み取れませんでした。\n"
-            "WAV / OGG / FLAC 形式の音声ファイルをアップロードしてください。"
-        )
-        st.stop()
+webrtc_ctx = webrtc_streamer(
+    key="audio",
+    mode=WebRtcMode.SENDONLY,
+    audio_receiver_size=256,
+    rtc_configuration=RTC_CONFIGURATION,
+    audio_frame_callback=audio_receiver,
+)
 
-    duration = len(y) / sr
-    st.caption(f"録音長: 約 {duration:.1f} 秒, サンプリングレート: {sr} Hz")
+if webrtc_ctx.state.playing is False:
+    st.warning("🎤 マイクが未接続です。ブラウザのマイク許可を確認してください。")
 
-    if duration < 1.0:
-        st.warning("1秒以上の音声をアップロードしてください。")
-    else:
-        # 無音トリム（極端に短くなったら元のまま）
-        yt, _ = librosa.effects.trim(y, top_db=40)
-        if len(yt) < sr * 0.8:
-            yt = y
+if not audio_queue.empty() and not webrtc_ctx.state.playing:
+    audio = np.concatenate(list(audio_queue.queue)).flatten()
+    audio_queue.queue.clear()
 
-        # --- 特徴量計算 --- #
-        # 全体の平均音量（RMS）
-        rms_frame = librosa.feature.rms(y=yt)[0]
-        rms_mean = float(rms_frame.mean())
+    sr = 48000
+    audio = audio / np.max(np.abs(audio) + 1e-9)
 
-        # ろれつ感に関連しそうな指標
-        zcr = float(librosa.feature.zero_crossing_rate(yt)[0].mean())  # 雑音・子音の多さ
-        flat = float(librosa.feature.spectral_flatness(y=yt).mean())   # スペクトル平坦度（こもり具合）
-        cent = float(librosa.feature.spectral_centroid(y=yt, sr=sr).mean())  # 明瞭さのざっくり指標
+    # 特徴量
+    rms = librosa.feature.rms(y=audio).mean()
+    zcr = librosa.feature.zero_crossing_rate(audio).mean()
+    centroid = librosa.feature.spectral_centroid(y=audio, sr=sr).mean()
 
-        # 無音の多さ（喋ってない時間が多いほど酔いっぽいとみなす）
-        energy = rms_frame
-        voiced_ratio = float((energy > (energy.mean() * 0.5)).mean())
+    # 正規化（ざっくり）
+    score = (
+        min(rms / 0.2, 1.0) * 0.4 +
+        (1 - min(zcr / 0.15, 1.0)) * 0.3 +
+        (1 - min(centroid / 4000, 1.0)) * 0.3
+    )
 
-        # --- 正規化（0〜1） --- #
-        # 経験的レンジ。かなりざっくり＆端末差を考えて広めに取る
-        loud_norm   = normalize(rms_mean, 0.01, 0.2, invert=False)      # 大きいほど酔い↑
-        zcr_norm    = normalize(zcr,      0.02, 0.15, invert=True)      # 低いほど酔い↑（単調・こもりぎみ）
-        flat_norm   = normalize(flat,     0.1,  0.5,  invert=False)     # 平坦度高いほど酔い↑
-        cent_norm   = normalize(cent,     1500, 4500, invert=True)      # セントロイド低いほど酔い↑
-        voiced_norm = normalize(voiced_ratio, 0.4, 0.95, invert=True)   # 無音多いほど酔い↑
+    drunk_score = int(score * 100)
 
-        # --- スコアリング（0〜100） --- #
-        # 重みは遊び用のヒューリスティック
-        score = (
-            0.35 * loud_norm +
-            0.2  * zcr_norm +
-            0.25 * flat_norm +
-            0.1  * cent_norm +
-            0.1  * voiced_norm
-        )
-        drunk_score = int(max(0, min(100, round(score * 100))))
+    st.subheader("🍶 推定酔っ払い度")
+    st.metric("スコア（0〜100）", drunk_score)
 
-        st.subheader("🍶 推定酔っ払い度（0〜100）")
-        st.metric("スコア", f"{drunk_score}")
-
-        with st.expander("解析に使った指標の詳細"):
-            st.json({
-                "duration_sec": duration,
-                "rms_mean": rms_mean,
-                "zcr_mean": zcr,
-                "flatness_mean": flat,
-                "centroid_mean": cent,
-                "voiced_ratio": voiced_ratio,
-                "loud_norm": loud_norm,
-                "zcr_norm": zcr_norm,
-                "flat_norm": flat_norm,
-                "cent_norm": cent_norm,
-                "voiced_norm": voiced_norm,
-            })
-
-        st.caption(
-            "※ 音量が大きく、スペクトルが平坦で、ゼロ交差率が低く、無音が多いほどスコアが上がるように設計しています。"
-        )
-else:
-    st.info("まずは音声ファイルをアップロードしてみてください。")
+    with st.expander("解析詳細"):
+        st.write({
+            "rms": float(rms),
+            "zcr": float(zcr),
+            "centroid": float(centroid),
+        })
