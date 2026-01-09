@@ -1,4 +1,5 @@
 streamlit
-librosa
-soundfile
+streamlit-webrtc
+av
 numpy
+librosa
